@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="CMD Center"/>
 <meta name="theme-color" content="#0a0a0a"/>
 <link rel="manifest" href="manifest.json"/>
+<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
@@ -429,22 +430,19 @@ body{display:flex;flex-direction:column}
       <div class="plaid-icon"><i class="ti ti-building-bank" aria-hidden="true"></i></div>
       <div>
         <div class="plaid-title">Bank Connection</div>
-        <div class="plaid-sub">simulated · real Plaid connection coming soon</div>
+        <div class="plaid-sub" id="plaid-status-sub">connect your bank to import transactions automatically</div>
       </div>
-      <div style="margin-left:auto">
-        <div class="connected-badge"><i class="ti ti-check" aria-hidden="true"></i> 2 accounts connected</div>
-      </div>
-    </div>
-    <div class="accounts-list">
-      <div class="account-row">
-        <div><div class="account-name">Chase Checking ••4821</div><div class="account-type">checking</div></div>
-        <div style="color:var(--green);font-family:var(--mono);font-size:13px">$12,450</div>
-      </div>
-      <div class="account-row">
-        <div><div class="account-name">Fidelity Brokerage</div><div class="account-type">investment</div></div>
-        <div style="color:var(--green);font-family:var(--mono);font-size:13px">$35,870</div>
+      <div style="margin-left:auto" id="plaid-header-action">
+        <button class="connect-btn" onclick="connectPlaid()"><i class="ti ti-link" aria-hidden="true"></i> Connect Bank</button>
       </div>
     </div>
+    <div id="plaid-accounts-list" style="display:none">
+      <div class="accounts-list" id="accounts-display"></div>
+    </div>
+    <div id="plaid-connecting" style="display:none;font-size:12px;color:var(--t3);font-family:var(--mono);padding:8px 0">
+      <i class="ti ti-loader" aria-hidden="true"></i> connecting to bank...
+    </div>
+    <div id="plaid-error" style="display:none;font-size:12px;color:var(--red);font-family:var(--mono);padding:8px 0"></div>
   </div>
 
   <div class="three-col" style="margin-bottom:16px">
@@ -626,19 +624,6 @@ const countdowns = [
   {name:'Vacation trip ✈',date:'2026-06-12'},
   {name:'Car loan free',date:'2026-08-27'},
   {name:'Year end review',date:'2026-12-31'}
-];
-
-const transactions = [
-  {name:'Netflix',cat:'Subscriptions',date:'May 24',amt:-15.99,icon:'📺',color:'var(--red)'},
-  {name:'Whole Foods',cat:'Food & Dining',date:'May 23',amt:-87.42,icon:'🛒',color:'var(--green)'},
-  {name:'Direct Deposit',cat:'Income',date:'May 22',amt:3400,icon:'💵',color:'var(--blue)'},
-  {name:'Uber',cat:'Transport',date:'May 21',amt:-24.50,icon:'🚗',color:'var(--amber)'},
-  {name:'Amazon',cat:'Shopping',date:'May 20',amt:-63.17,icon:'📦',color:'var(--purple)'},
-  {name:'Starbucks',cat:'Food & Dining',date:'May 20',amt:-6.75,icon:'☕',color:'var(--amber)'},
-  {name:'Gym Membership',cat:'Health',date:'May 19',amt:-45,icon:'🏋️',color:'var(--green)'},
-  {name:'Freelance Payment',cat:'Income',date:'May 18',amt:800,icon:'💵',color:'var(--blue)'},
-  {name:'Spotify',cat:'Subscriptions',date:'May 17',amt:-9.99,icon:'🎵',color:'var(--green)'},
-  {name:'Electric Bill',cat:'Utilities',date:'May 15',amt:-112,icon:'⚡',color:'var(--amber)'}
 ];
 
 // ─── CLOCK ────────────────────────────────────────────────────
@@ -989,31 +974,138 @@ function renderCountdowns(){
   }).join('');
 }
 
-// ─── TRANSACTIONS ─────────────────────────────────────────────
-function renderTransactions(){
+// ─── PLAID ────────────────────────────────────────────────────
+const BACKEND='https://dashboard-backend-7pdg.onrender.com';
+let plaidConnected=load('plaid_connected',false);
+
+async function connectPlaid(){
+  document.getElementById('plaid-connecting').style.display='block';
+  document.getElementById('plaid-error').style.display='none';
+  document.getElementById('plaid-header-action').style.display='none';
+  try{
+    const res=await fetch(BACKEND+'/create_link_token',{method:'POST',headers:{'Content-Type':'application/json'}});
+    const data=await res.json();
+    if(data.error)throw new Error(data.error);
+    const handler=Plaid.create({
+      token:data.link_token,
+      onSuccess:async(public_token,metadata)=>{
+        try{
+          const ex=await fetch(BACKEND+'/exchange_token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({public_token})});
+          const exData=await ex.json();
+          if(exData.error)throw new Error(exData.error);
+          plaidConnected=true;
+          save('plaid_connected',true);
+          document.getElementById('plaid-connecting').style.display='none';
+          document.getElementById('plaid-status-sub').textContent='connected · '+(metadata.institution?metadata.institution.name:'bank');
+          document.getElementById('plaid-header-action').innerHTML='<div class="connected-badge"><i class="ti ti-check" aria-hidden="true"></i> connected</div>';
+          document.getElementById('plaid-header-action').style.display='block';
+          await loadPlaidTransactions();
+        }catch(e){showPlaidError(e.message);}
+      },
+      onExit:(err)=>{
+        document.getElementById('plaid-connecting').style.display='none';
+        document.getElementById('plaid-header-action').style.display='block';
+        if(err)showPlaidError(err.display_message||'Connection cancelled');
+      }
+    });
+    document.getElementById('plaid-connecting').style.display='none';
+    handler.open();
+  }catch(e){
+    showPlaidError('Backend may be waking up (takes ~30s on free tier). Wait a moment and try again. Error: '+e.message);
+    document.getElementById('plaid-header-action').style.display='block';
+  }
+}
+
+function showPlaidError(msg){
+  document.getElementById('plaid-connecting').style.display='none';
+  const el=document.getElementById('plaid-error');
+  el.style.display='block';
+  el.textContent='⚠ '+msg;
+}
+
+async function loadPlaidTransactions(){
   const el=document.getElementById('tx-list');
   if(!el)return;
-  el.innerHTML=transactions.map(t=>`
-    <div class="tx-row">
-      <div class="tx-l">
-        <div class="tx-icon" style="background:${t.color}22">${t.icon}</div>
-        <div><div class="tx-name">${t.name}</div><div class="tx-cat">${t.cat}</div></div>
-      </div>
-      <div style="text-align:right">
-        <div class="tx-amt" style="color:${t.amt>0?'var(--green)':'var(--t1)'}">${t.amt>0?'+':''}$${Math.abs(t.amt).toFixed(2)}</div>
-        <div class="tx-date">${t.date}</div>
-      </div>
-    </div>`).join('');
+  el.innerHTML='<div style="font-size:12px;color:var(--t3);font-family:var(--mono);padding:12px 0">loading transactions...</div>';
+  try{
+    const res=await fetch(BACKEND+'/transactions');
+    const data=await res.json();
+    if(data.error)throw new Error(data.error);
+    const txs=data.transactions;
+    if(!txs||txs.length===0){el.innerHTML='<div style="font-size:12px;color:var(--t3);font-family:var(--mono);padding:12px 0">no transactions found</div>';return;}
+    const catIcon=c=>{
+      const m={'Food and Drink':'🍔','Shops':'🛒','Travel':'✈','Recreation':'🎮','Transfer':'💸','Deposit':'💵','Payment':'💳','Service':'⚙','Healthcare':'🏥'};
+      for(const k in m)if(c&&c.includes(k))return m[k];
+      return '💰';
+    };
+    el.innerHTML=txs.slice(0,20).map(t=>{
+      const neg=t.amount>0;
+      const d=new Date(t.date);
+      const dateStr=d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+      const cat=(t.category&&t.category[0])||'Other';
+      return `<div class="tx-row">
+        <div class="tx-l">
+          <div class="tx-icon" style="background:var(--s3)">${catIcon(cat)}</div>
+          <div><div class="tx-name">${t.name}</div><div class="tx-cat">${cat}</div></div>
+        </div>
+        <div style="text-align:right">
+          <div class="tx-amt" style="color:${neg?'var(--red)':'var(--green)'}">${neg?'-':'+'}\$${Math.abs(t.amount).toFixed(2)}</div>
+          <div class="tx-date">${dateStr}</div>
+        </div>
+      </div>`;
+    }).join('');
+    let inc=0,exp=0;
+    txs.forEach(t=>{if(t.amount<0)inc+=Math.abs(t.amount);else exp+=t.amount;});
+    const incEl=document.getElementById('income-display');
+    const expEl=document.getElementById('expense-display');
+    const srEl=document.getElementById('savings-rate');
+    if(incEl)incEl.textContent='$'+Math.round(inc).toLocaleString();
+    if(expEl)expEl.textContent='$'+Math.round(exp).toLocaleString();
+    if(srEl&&inc>0)srEl.textContent=((inc-exp)/inc*100).toFixed(1)+'%';
+  }catch(e){
+    el.innerHTML=`<div style="font-size:12px;color:var(--red);font-family:var(--mono);padding:12px 0">⚠ ${e.message}</div>`;
+  }
+}
+
+// ─── TRANSACTIONS (fallback simulated data) ───────────────────
+function renderTransactions(){
+  if(plaidConnected){loadPlaidTransactions();return;}
+  const el=document.getElementById('tx-list');
+  if(!el)return;
+  const demo=[
+    {name:'Netflix',cat:'Subscriptions',date:'May 24',amt:-15.99,icon:'📺'},
+    {name:'Whole Foods',cat:'Food & Dining',date:'May 23',amt:-87.42,icon:'🛒'},
+    {name:'Direct Deposit',cat:'Income',date:'May 22',amt:3400,icon:'💵'},
+    {name:'Uber',cat:'Transport',date:'May 21',amt:-24.50,icon:'🚗'},
+    {name:'Amazon',cat:'Shopping',date:'May 20',amt:-63.17,icon:'📦'},
+    {name:'Starbucks',cat:'Food & Dining',date:'May 20',amt:-6.75,icon:'☕'},
+    {name:'Gym Membership',cat:'Health',date:'May 19',amt:-45,icon:'🏋️'},
+    {name:'Freelance Payment',cat:'Income',date:'May 18',amt:800,icon:'💵'},
+    {name:'Spotify',cat:'Subscriptions',date:'May 17',amt:-9.99,icon:'🎵'},
+    {name:'Electric Bill',cat:'Utilities',date:'May 15',amt:-112,icon:'⚡'}
+  ];
+  el.innerHTML='<div style="font-size:11px;color:var(--amber);font-family:var(--mono);padding:8px 0 10px;display:flex;align-items:center;gap:6px"><i class="ti ti-alert-triangle" aria-hidden="true"></i> showing demo data — connect your bank above for real transactions</div>'
+  +demo.map(t=>`<div class="tx-row">
+    <div class="tx-l"><div class="tx-icon" style="background:var(--s3)">${t.icon}</div>
+    <div><div class="tx-name">${t.name}</div><div class="tx-cat">${t.cat}</div></div></div>
+    <div style="text-align:right">
+      <div class="tx-amt" style="color:${t.amt>0?'var(--green)':'var(--t1)'}">${t.amt>0?'+':''}$${Math.abs(t.amt).toFixed(2)}</div>
+      <div class="tx-date">${t.date}</div>
+    </div></div>`).join('');
 }
 
 // ─── MODALS ───────────────────────────────────────────────────
-function openModal(id){ document.getElementById(id).classList.add('on'); }
-function closeModal(id){ document.getElementById(id).classList.remove('on'); }
+function openModal(id){document.getElementById(id).classList.add('on');}
+function closeModal(id){document.getElementById(id).classList.remove('on');}
 document.querySelectorAll('.modal-bg').forEach(m=>{
-  m.addEventListener('click',e=>{ if(e.target===m) m.classList.remove('on'); });
+  m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('on');});
 });
 
 // ─── INIT ─────────────────────────────────────────────────────
+if(plaidConnected){
+  document.getElementById('plaid-status-sub').textContent='connected · loading...';
+  document.getElementById('plaid-header-action').innerHTML='<div class="connected-badge"><i class="ti ti-check" aria-hidden="true"></i> connected</div>';
+}
 renderPage('home');
 </script>
 </body>
