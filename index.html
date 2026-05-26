@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="CMD Center"/>
 <meta name="theme-color" content="#0a0a0a"/>
 <link rel="manifest" href="manifest.json"/>
-<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+<script src="https://cdn.teller.io/connect/connect.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
@@ -434,6 +434,7 @@ body{display:flex;flex-direction:column}
       </div>
       <div style="margin-left:auto" id="plaid-header-action">
         <button class="connect-btn" onclick="connectPlaid()"><i class="ti ti-link" aria-hidden="true"></i> Connect Bank</button>
+        <input type="hidden" id="teller-app-id" value="app_psocrl6l37dq02pb1m000"/>
       </div>
     </div>
     <div id="plaid-accounts-list" style="display:none">
@@ -974,88 +975,97 @@ function renderCountdowns(){
   }).join('');
 }
 
-// ─── PLAID ────────────────────────────────────────────────────
+// ─── TELLER ───────────────────────────────────────────────────
 const BACKEND='https://dashboard-backend-7pdg.onrender.com';
-let plaidConnected=load('plaid_connected',false);
+let tellerConnected=load('teller_connected',false);
 
-async function connectPlaid(){
+function connectPlaid(){
+  showBankError('');
   document.getElementById('plaid-connecting').style.display='block';
-  document.getElementById('plaid-error').style.display='none';
   document.getElementById('plaid-header-action').style.display='none';
-  try{
-    const res=await fetch(BACKEND+'/create_link_token',{method:'POST',headers:{'Content-Type':'application/json'}});
-    const data=await res.json();
-    if(data.error)throw new Error(data.error);
-    const handler=Plaid.create({
-      token:data.link_token,
-      onSuccess:async(public_token,metadata)=>{
-        try{
-          const ex=await fetch(BACKEND+'/exchange_token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({public_token})});
-          const exData=await ex.json();
-          if(exData.error)throw new Error(exData.error);
-          plaidConnected=true;
-          save('plaid_connected',true);
-          document.getElementById('plaid-connecting').style.display='none';
-          document.getElementById('plaid-status-sub').textContent='connected · '+(metadata.institution?metadata.institution.name:'bank');
-          document.getElementById('plaid-header-action').innerHTML='<div class="connected-badge"><i class="ti ti-check" aria-hidden="true"></i> connected</div>';
-          document.getElementById('plaid-header-action').style.display='block';
-          await loadPlaidTransactions();
-        }catch(e){showPlaidError(e.message);}
-      },
-      onExit:(err)=>{
-        document.getElementById('plaid-connecting').style.display='none';
+  const tellerConnect=TellerConnect.setup({
+    applicationId: document.getElementById('teller-app-id').value||'',
+    environment:'sandbox',
+    onInit:()=>{
+      document.getElementById('plaid-connecting').style.display='none';
+    },
+    onSuccess:async(enrollment)=>{
+      try{
+        const res=await fetch(BACKEND+'/teller/enrollment',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({accessToken:enrollment.accessToken})
+        });
+        const data=await res.json();
+        if(!data.success)throw new Error('Enrollment failed');
+        tellerConnected=true;
+        save('teller_connected',true);
+        save('teller_access_token',enrollment.accessToken);
+        document.getElementById('plaid-status-sub').textContent='connected · Webster Bank';
+        document.getElementById('plaid-header-action').innerHTML='<div class="connected-badge"><i class="ti ti-check" aria-hidden="true"></i> connected</div>';
         document.getElementById('plaid-header-action').style.display='block';
-        if(err)showPlaidError(err.display_message||'Connection cancelled');
-      }
-    });
-    document.getElementById('plaid-connecting').style.display='none';
-    handler.open();
-  }catch(e){
-    showPlaidError('Backend may be waking up (takes ~30s on free tier). Wait a moment and try again. Error: '+e.message);
-    document.getElementById('plaid-header-action').style.display='block';
-  }
+        await loadTellerTransactions();
+      }catch(e){showBankError(e.message);}
+    },
+    onExit:()=>{
+      document.getElementById('plaid-connecting').style.display='none';
+      document.getElementById('plaid-header-action').style.display='block';
+    }
+  });
+  tellerConnect.open();
 }
 
-function showPlaidError(msg){
+function showBankError(msg){
   document.getElementById('plaid-connecting').style.display='none';
+  document.getElementById('plaid-header-action').style.display='block';
   const el=document.getElementById('plaid-error');
-  el.style.display='block';
-  el.textContent='⚠ '+msg;
+  el.style.display=msg?'block':'none';
+  el.textContent=msg?'⚠ '+msg:'';
 }
 
-async function loadPlaidTransactions(){
+async function loadTellerTransactions(){
   const el=document.getElementById('tx-list');
   if(!el)return;
   el.innerHTML='<div style="font-size:12px;color:var(--t3);font-family:var(--mono);padding:12px 0">loading transactions...</div>';
   try{
-    const res=await fetch(BACKEND+'/transactions');
+    const res=await fetch(BACKEND+'/teller/transactions');
     const data=await res.json();
     if(data.error)throw new Error(data.error);
     const txs=data.transactions;
-    if(!txs||txs.length===0){el.innerHTML='<div style="font-size:12px;color:var(--t3);font-family:var(--mono);padding:12px 0">no transactions found</div>';return;}
+    if(!txs||txs.length===0){
+      el.innerHTML='<div style="font-size:12px;color:var(--t3);font-family:var(--mono);padding:12px 0">no transactions found</div>';
+      return;
+    }
     const catIcon=c=>{
-      const m={'Food and Drink':'🍔','Shops':'🛒','Travel':'✈','Recreation':'🎮','Transfer':'💸','Deposit':'💵','Payment':'💳','Service':'⚙','Healthcare':'🏥'};
-      for(const k in m)if(c&&c.includes(k))return m[k];
+      const m={food:'🍔',shop:'🛒',travel:'✈',entertainment:'🎮',transfer:'💸',income:'💵',payment:'💳',service:'⚙',health:'🏥',utilities:'⚡'};
+      if(!c)return '💰';
+      const cl=c.toLowerCase();
+      for(const k in m)if(cl.includes(k))return m[k];
       return '💰';
     };
-    el.innerHTML=txs.slice(0,20).map(t=>{
-      const neg=t.amount>0;
+    el.innerHTML=txs.slice(0,30).map(t=>{
+      const isDebit=t.type==='debit';
       const d=new Date(t.date);
       const dateStr=d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
-      const cat=(t.category&&t.category[0])||'Other';
+      const cat=t.details&&t.details.category?t.details.category:'other';
+      const amt=parseFloat(t.amount)||0;
       return `<div class="tx-row">
         <div class="tx-l">
           <div class="tx-icon" style="background:var(--s3)">${catIcon(cat)}</div>
-          <div><div class="tx-name">${t.name}</div><div class="tx-cat">${cat}</div></div>
+          <div><div class="tx-name">${t.description}</div><div class="tx-cat">${cat}${t.account_name?' · '+t.account_name:''}</div></div>
         </div>
         <div style="text-align:right">
-          <div class="tx-amt" style="color:${neg?'var(--red)':'var(--green)'}">${neg?'-':'+'}\$${Math.abs(t.amount).toFixed(2)}</div>
+          <div class="tx-amt" style="color:${isDebit?'var(--red)':'var(--green)'}">${isDebit?'-':'+'}\$${Math.abs(amt).toFixed(2)}</div>
           <div class="tx-date">${dateStr}</div>
         </div>
       </div>`;
     }).join('');
     let inc=0,exp=0;
-    txs.forEach(t=>{if(t.amount<0)inc+=Math.abs(t.amount);else exp+=t.amount;});
+    txs.forEach(t=>{
+      const amt=parseFloat(t.amount)||0;
+      if(t.type==='credit')inc+=amt;
+      else exp+=amt;
+    });
     const incEl=document.getElementById('income-display');
     const expEl=document.getElementById('expense-display');
     const srEl=document.getElementById('savings-rate');
@@ -1063,13 +1073,13 @@ async function loadPlaidTransactions(){
     if(expEl)expEl.textContent='$'+Math.round(exp).toLocaleString();
     if(srEl&&inc>0)srEl.textContent=((inc-exp)/inc*100).toFixed(1)+'%';
   }catch(e){
-    el.innerHTML=`<div style="font-size:12px;color:var(--red);font-family:var(--mono);padding:12px 0">⚠ ${e.message}</div>`;
+    el.innerHTML=`<div style="font-size:12px;color:var(--red);font-family:var(--mono);padding:12px 0">⚠ ${e.message} — backend may be waking up, try refreshing in 30s</div>`;
   }
 }
 
 // ─── TRANSACTIONS (fallback simulated data) ───────────────────
 function renderTransactions(){
-  if(plaidConnected){loadPlaidTransactions();return;}
+  if(tellerConnected){loadTellerTransactions();return;}
   const el=document.getElementById('tx-list');
   if(!el)return;
   const demo=[
@@ -1102,8 +1112,8 @@ document.querySelectorAll('.modal-bg').forEach(m=>{
 });
 
 // ─── INIT ─────────────────────────────────────────────────────
-if(plaidConnected){
-  document.getElementById('plaid-status-sub').textContent='connected · loading...';
+if(tellerConnected){
+  document.getElementById('plaid-status-sub').textContent='connected · Webster Bank';
   document.getElementById('plaid-header-action').innerHTML='<div class="connected-badge"><i class="ti ti-check" aria-hidden="true"></i> connected</div>';
 }
 renderPage('home');
